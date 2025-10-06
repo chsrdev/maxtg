@@ -1,29 +1,30 @@
 import subprocess
 import time
-import sys
+import sys, os
 import datetime
+from telegram import send_to_telegram
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+MONITOR_ID = os.getenv("MONITOR_ID")
 
 def run_with_restart():
-    restart_count = 0
-    
+    restart_alarm = False
     while True:
         try:
             print(f"[{datetime.datetime.now()}] Запуск main.py...")
             
-            # Запускаем процесс
             process = subprocess.Popen([sys.executable, "main.py"])
-            
-            # Ждем завершения
+            restart_alarm = True
             process.wait()
             exit_code = process.returncode
-            
-            if exit_code == 0:
-                print(f"[{datetime.datetime.now()}] Скрипт завершился нормально.")
-                break
-            else:
-                restart_count += 1
-                print(f"[{datetime.datetime.now()}] Скрипт упал (код: {exit_code}). Перезапуск #{restart_count} через 3 секунды...")
-                time.sleep(3)
+            if restart_alarm:
+                send_to_telegram(
+                    TG_BOT_TOKEN,
+                    MONITOR_ID,
+                    f"[{datetime.datetime.now()}] Скрипт упал (код: {exit_code})"
+                )
+                restart_alarm = False
+            print(f"[{datetime.datetime.now()}] Скрипт упал (код: {exit_code}). Перезапуск через 3 секунды...")
+            time.sleep(3)
                 
         except KeyboardInterrupt:
             print(f"\n[{datetime.datetime.now()}] Остановлено пользователем")
