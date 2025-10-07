@@ -28,7 +28,7 @@ class Name:
 
 # region Contact
 class Contact:
-    def __init__(self, client, accountStatus = None, baseUrl = None, names = None, phone = None, description = None, options = None, photoId = None, updateTime = None, id = None, baseRawUrl = None, gender = None, link = None):
+    def __init__(self, client, accountStatus = None, baseUrl = None, names = None, phone = None, description = None, options = None, photoId = None, updateTime = None, id = None, baseRawUrl = None, gender = None, link = None, **kwargs):
         """
         Represents a contact with detailed profile information.
 
@@ -116,6 +116,8 @@ class Chat:
                 m = Message(client, 0, **msg, _f=1)
                 _.append(m)
             self.messages: list[Message] = _
+            for msg in self.messages:
+                print("\n\n\n\n\n{msg.text}")
 
     # region pin()
     def pin(self):
