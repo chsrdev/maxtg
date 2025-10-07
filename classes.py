@@ -116,8 +116,6 @@ class Chat:
                 m = Message(client, 0, **msg, _f=1)
                 _.append(m)
             self.messages: list[Message] = _
-            for msg in self.messages:
-                print("\n\n\n\n\n{msg.text}")
 
     # region pin()
     def pin(self):
