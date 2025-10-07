@@ -21,12 +21,6 @@ client = Client(MAX_TOKEN)
 def onconnect():
     if client.me != None:
         print(f"Имя: {client.me.contact.names[0].name}, Номер: {client.me.contact.phone} | ID: {client.me.contact.id}")
-        if MONITOR_ID != "":
-            send_to_telegram(
-                TG_BOT_TOKEN,
-                MONITOR_ID,
-                f"<b>Бот встал</b>",
-            )
 
 
 @client.on_message(filters.any())

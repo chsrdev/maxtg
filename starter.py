@@ -13,10 +13,16 @@ def run_with_restart():
             print(f"[{datetime.datetime.now()}] Запуск main.py...")
             
             process = subprocess.Popen([sys.executable, "main.py"])
+            if MONITOR_ID != "":
+                send_to_telegram(
+                    TG_BOT_TOKEN,
+                    MONITOR_ID,
+                    f"<b>Бот встал</b>",
+                )
             restart_alarm = True
             process.wait()
             exit_code = process.returncode
-            if restart_alarm:
+            if MONITOR_ID != "" and restart_alarm:
                 send_to_telegram(
                     TG_BOT_TOKEN,
                     MONITOR_ID,
