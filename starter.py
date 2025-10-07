@@ -3,6 +3,9 @@ import time
 import sys, os
 import datetime
 from telegram import send_to_telegram
+from dotenv import load_dotenv
+
+load_dotenv()
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 MONITOR_ID = os.getenv("MONITOR_ID")
 
