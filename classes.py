@@ -140,6 +140,8 @@ class Message:
         and provides methods to interact with the message (e.g., reply, delete, edit).
         """
         self._client = client
+        self.kwargs = kwargs
+        self.status = kwargs.get("status")
 
         if not _f:
             self.chat = Chat(client, chatId)
