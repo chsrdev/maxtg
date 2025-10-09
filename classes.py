@@ -14,17 +14,17 @@ EMOJIS = Literal[
 
 # region Name
 class Name:
-    def __init__(self, name, firstName, lastName, type):
+    def __init__(self, **kwargs):
         """
         Represents a name structure for a contact.
 
         This class stores name-related information for a contact, including a full name,
         first name, last name, and type.
         """
-        self.name = name
-        self.first_name = firstName
-        self.last_name = lastName
-        self.type = type
+        self.name = kwargs.get('name')
+        self.first_name = kwargs.get('firstName')
+        self.last_name = kwargs.get('lastName')
+        self.type = kwargs.get('type')
 
 # region Contact
 class Contact:
@@ -38,7 +38,7 @@ class Contact:
         self._client = client
         self.accountStatus = accountStatus
         self.base_url = baseUrl
-        self.names = [Name(**n) for n in names]
+        self.names = [Name(**n) for n in names] if names else []
         self.phone = phone
         self.description = description
         self.options = options
