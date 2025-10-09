@@ -15,7 +15,10 @@ def run_with_restart():
         try:
             print(f"[{datetime.datetime.now()}] Запуск main.py...")
             
-            process = subprocess.Popen([sys.executable, "main.py"])
+            process = subprocess.Popen(
+                [sys.executable, "main.py"],
+                stderr=subprocess.PIPE,
+                text=True)
             if MONITOR_ID != "":
                 send_to_telegram(
                     TG_BOT_TOKEN,
@@ -25,11 +28,12 @@ def run_with_restart():
             restart_alarm = True
             process.wait()
             exit_code = process.returncode
+            stderr = process.communicate()
             if MONITOR_ID != "" and restart_alarm:
                 send_to_telegram(
                     TG_BOT_TOKEN,
                     MONITOR_ID,
-                    f"[{datetime.datetime.now()}] Скрипт упал (код: {exit_code})"
+                    f"[{datetime.datetime.now()}] Скрипт упал (код: {exit_code})\nstderr:{stderr}"
                 )
                 restart_alarm = False
             print(f"[{datetime.datetime.now()}] Скрипт упал (код: {exit_code}). Перезапуск через 3 секунды...")
