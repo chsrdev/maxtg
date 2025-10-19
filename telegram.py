@@ -1,6 +1,13 @@
 import requests, json
 
-def send_to_telegram(TG_BOT_TOKEN: str="", TG_CHAT_ID: int = 0, caption: str = "", attachments: list[str] = []):
+def handle_attach(attach: dict) -> str:
+    match attach["_type"]:
+        case "FILE":
+            return attach["name"]
+        case _:
+            return attach["_type"]
+
+def send_to_telegram(TG_BOT_TOKEN: str="", TG_CHAT_ID: int = 0, caption: str = "", attachments: list[dict] = []):
     if not attachments:  # нет фоток — просто текст
         if caption == "": return
         api_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
@@ -12,32 +19,29 @@ def send_to_telegram(TG_BOT_TOKEN: str="", TG_CHAT_ID: int = 0, caption: str = "
         print(resp.json())
         return
 
-    # одна фотка — отправляем через sendPhoto
-    if len(attachments) == 1:
-        api_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
-        resp = requests.post(api_url, data={
-            "chat_id": TG_CHAT_ID,
-            "photo": attachments[0],
-            "caption": caption,
-            "parse_mode": "HTML"
-        })
-        print(resp.json())
-        return
-
-    # несколько фоток (от 2 до 10) — альбом
-    if 2 <= len(attachments) <= 10:
+    if 1 <= len(attachments) <= 10:
         api_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMediaGroup"
         media = []
-        for i, url in enumerate(attachments):
-            item = {"type": "photo", "media": url}
-            if i == 0 and caption:
-                item["caption"] = caption
-            media.append(item)
+        not_handled_attachs = attachments.copy()
+        for i, attach in enumerate(attachments):
+            if attach["_type"] == "PHOTO":
+                item = {"type": "photo", "media": attach["baseUrl"]}
+                not_handled_attachs.remove(attach)
+                if i == 0 and caption:
+                    item["caption"] = caption
+                    item["parse_mode"] = "HTML"
+                media.append(item)
+        if not_handled_attachs:
+            if media:
+                print(not_handled_attachs)
+                media[0]["caption"] += f"\n\nНеобработанные файлы: " + ', '.join(handle_attach(attach) for attach in not_handled_attachs)
+            else:
+                send_to_telegram(TG_BOT_TOKEN, TG_CHAT_ID, caption + f"\n\nНеобработанные файлы: " + ', '.join(handle_attach(attach) for attach in not_handled_attachs))
+                return
 
         payload = {
             "chat_id": TG_CHAT_ID,
-            "media": json.dumps(media),  # ⚔️ json.dumps обязателен
-            "parse_mode": "HTML"
+            "media": json.dumps(media)
         }
         resp = requests.post(api_url, data=payload)
         print(resp.json())

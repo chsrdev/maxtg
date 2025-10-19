@@ -34,6 +34,8 @@ def run_with_restart():
                     TG_BOT_TOKEN,
                     MONITOR_ID,
                     f"[{datetime.datetime.now()}] Скрипт упал (код: {exit_code})\nstderr:{stderr}"
+        
+            
                 )
                 restart_alarm = False
             print(f"[{datetime.datetime.now()}] Скрипт упал (код: {exit_code}). Перезапуск через 3 секунды...")

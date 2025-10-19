@@ -38,14 +38,14 @@ def onmessage(client: Client, message: Message):
                     msg_attaches = message.kwargs["link"]["message"]["attaches"]
                     forwarded_msg_author = client.get_user(id=message.kwargs["link"]["message"]["sender"], _f=1)
                     name = f"{name}\n(Переслано: {forwarded_msg_author.contact.names[0].name})"
-                    # print(message.kwargs)
 
         if msg_text != "" or msg_attaches != []:
             send_to_telegram(
                 TG_BOT_TOKEN,
                 TG_CHAT_ID,
                 f"<b>{name}</b>\n{msg_text}" if msg_text != "" else f"<b>{name}</b>",
-                [attach['baseUrl'] for attach in msg_attaches if 'baseUrl' in attach]
+                msg_attaches
+                # [attach['baseUrl'] for attach in msg_attaches if 'baseUrl' in attach]
             )
 client.run()
 
