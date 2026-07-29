@@ -1,8 +1,8 @@
 from websockets.sync.client import connect
 from websockets.exceptions import ConnectionClosedError
 import json
+import queue
 import threading
-import websockets
 import time
 from uuid import uuid4
 from classes import *
@@ -47,6 +47,13 @@ class MaxClient:
         self.session_id = int(time.time()*1000)
 
         self.handlers = []
+        self._pending: dict[int, queue.Queue] = {}
+        self._pending_lock = threading.Lock()
+        self._send_lock = threading.Lock()
+        self._event_queue: queue.Queue = queue.Queue()
+        self._user_cache: dict = {}
+        self._worker_thread = None
+        self.connected_at_ms = 0
 
     # region seq
     @property
@@ -54,6 +61,30 @@ class MaxClient:
         current_seq = self._seq
         self._seq += 1
         return current_seq
+
+    def invoke_method(self, opcode: int, payload: dict, timeout: float = 30):
+        """Send RPC and wait for matching seq response (listener delivers it)."""
+        if not self.websocket:
+            raise RuntimeError("WebSocket not connected")
+        seq = self.seq
+        waiter: queue.Queue = queue.Queue(maxsize=1)
+        with self._pending_lock:
+            self._pending[seq] = waiter
+        packet = {
+            "ver": 11,
+            "cmd": 0,
+            "seq": seq,
+            "opcode": opcode,
+            "payload": payload,
+        }
+        with self._send_lock:
+            self.websocket.send(json.dumps(packet))
+        try:
+            return waiter.get(timeout=timeout)
+        except queue.Empty:
+            with self._pending_lock:
+                self._pending.pop(seq, None)
+            raise TimeoutError(f"No response for opcode={opcode} seq={seq}")
     
     # region cid
     @property
@@ -139,6 +170,7 @@ class MaxClient:
         usr = User(self, p['profile'])
         self.me = usr
         self._connected = True
+        self.connected_at_ms = int(time.time() * 1000)
 
         if self._on_connect:
             self._on_connect()
@@ -195,13 +227,15 @@ class MaxClient:
         """Отправляет пинг серверу каждые 25 секунд"""
         while self._connected and not self._t_stop:
             try:
-                self.websocket.send(json.dumps({
-                    "ver": 11,
-                    "cmd": 0,
-                    "seq": self.seq,
-                    "opcode": 1,
-                    "payload": {"interactive": False}
-                }))
+                with self._send_lock:
+                    if self.websocket:
+                        self.websocket.send(json.dumps({
+                            "ver": 11,
+                            "cmd": 0,
+                            "seq": self.seq,
+                            "opcode": 1,
+                            "payload": {"interactive": False}
+                        }))
             except Exception as e:
                 print("Heartbeat error:", e)
             time.sleep(25)
@@ -209,79 +243,58 @@ class MaxClient:
 
     # region _listener()
     def _listener(self):
-        """Listener with batch processing for multiple messages"""
+        """Only reads websocket: routes RPC replies and queues incoming messages."""
         while not self._t_stop:
             try:
-                # Получаем первое сообщение
                 recv = json.loads(self.websocket.recv())
-                
-                # Обрабатываем первое сообщение
-                self._process_message(recv)
-                
-                # Проверяем, есть ли еще сообщения в буфере
-                while True:
-                    try:
-                        # Пытаемся получить следующее сообщение с таймаутом 0.01 сек
-                        next_msg = json.loads(self.websocket.recv(timeout=0.01))
-                        self._process_message(next_msg)
-                    except TimeoutError:
-                        # Больше нет сообщений в буфере
-                        break
-                    except ConnectionClosedError:
-                        break
-                        
             except ConnectionClosedError:
                 self._connected = False
                 try:
                     if self.websocket:
                         self.websocket.close()
-                except:
+                except Exception:
                     pass
                 time.sleep(3)
                 try:
                     self.connect()
+                    self._connected = True
+                    print(f"Переподключено, сессия с {self.connected_at_ms}")
                 except Exception as ee:
                     print("Не смог встать:", ee)
                     time.sleep(5)
-                else:
-                    break
+                continue
 
             except Exception as e:
-                print(e)
+                print("Иная беда:", e)
                 self._connected = False
                 time.sleep(5)
                 continue
 
-    def _process_message(self, recv):
-        """Process a single message"""
-        opcode = recv.get("opcode")
-        payload = recv.get("payload")
+            seq = recv.get("seq")
+            with self._pending_lock:
+                waiter = self._pending.pop(seq, None) if seq is not None else None
+            if waiter is not None:
+                waiter.put(recv)
+                continue
 
-        match opcode:
-            case 1:
-                try:
-                    self.websocket.send(json.dumps({
-                        "ver": 11,
-                        "cmd": 0,
-                        "seq": self.seq,
-                        "opcode": 1,
-                        "payload": {"interactive": False}
-                    }))
-                except:
-                    pass
+            opcode = recv.get("opcode")
+            if opcode == 128:
+                self._event_queue.put(recv)
+            # opcode 1 keepalive replies — ignore
 
-            case 128:
-                try:
-                    msg = Message(self, payload["chatId"], **payload["message"])
-                    self._hlprocessor(msg)
-                except Exception as e:
-                    print("Ошибка обработки сообщения:", e)
-
-            case _:
-                pass
-
-        # Необязательно: можно закомментировать, если спамит в консоль
-        print(json.dumps(recv, ensure_ascii=False, indent=4))
+    def _worker(self):
+        """Processes incoming messages off the listener thread."""
+        while not self._t_stop:
+            try:
+                recv = self._event_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+            try:
+                payload = recv.get("payload") or {}
+                msg = Message(self, payload["chatId"], **payload["message"])
+                self._hlprocessor(msg)
+            except Exception as e:
+                print("Ошибка обработки сообщения:", e)
 
 
     # region run()
@@ -299,10 +312,18 @@ class MaxClient:
             ```
         """
         self.connect()
-        self._t = threading.Thread(target=self._listener, name="WebMaxListener")
-        self._t.daemon = True  # Добавляем daemon=True для автоматического завершения
+        self._t_stop = False
+        self._t = threading.Thread(target=self._listener, name="WebMaxListener", daemon=True)
         self._t.start()
+        self._worker_thread = threading.Thread(target=self._worker, name="WebMaxWorker", daemon=True)
+        self._worker_thread.start()
         threading.Thread(target=self._heartbeat, name="WebMaxHeartbeat", daemon=True).start()
+        # Keep process alive
+        try:
+            while not self._t_stop:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.stop()
     
     def stop(self):
         """
@@ -478,43 +499,29 @@ class MaxClient:
             msg = client.send_message(12345678, "Replying to you!", reply_id=987654)
             ```
         """
-        seq = self.seq
-        j = {
-            "ver":11,
-            "cmd":0,
-            "seq":seq,
-            "opcode":64,
-            "payload": {
-                "chatId":chat_id,
-                "message": {
-                    "text":text,
-                    "cid": self.cid,
-                    "elements":[],
-                    "attaches":[]
-                },
-                "notify": notify
-            }
+        payload = {
+            "chatId": chat_id,
+            "message": {
+                "text": text,
+                "cid": self.cid,
+                "elements": [],
+                "attaches": []
+            },
+            "notify": notify
         }
 
         if reply_id:
-            j["payload"]["message"]["link"] = {
+            payload["message"]["link"] = {
                 "type": "REPLY",
                 "messageId": str(reply_id)
             }
 
-        self.websocket.send(json.dumps(j))
-        while True:
-            recv = json.loads(self.websocket.recv())
-            if recv["seq"] != seq:
-                pass
-            else:
-                break
+        recv = self.invoke_method(64, payload)
         payload = recv["payload"]
         try:
             msg = Message(self, payload["chatId"], **payload["message"])
-        
             return msg
-        except:
+        except Exception:
             raise
 
     # region delete_message()
@@ -542,17 +549,11 @@ class MaxClient:
             client.delete_message(12345678, ["1000120"], for_me=True)
             ```
         """
-        self.websocket.send(json.dumps({
-            "ver":11,
-            "cmd":0,
-            "seq":self.seq,
-            "opcode":66,
-            "payload": {
-                "chatId":chat_id,
-                "messageIds": message_ids,
-                "forMe": for_me
-            }
-        }))
+        self.invoke_method(66, {
+            "chatId": chat_id,
+            "messageIds": message_ids,
+            "forMe": for_me
+        })
 
     # region edit_message()
     def edit_message(self, chat_id: int, message_id: str|int, text: str):
@@ -579,30 +580,15 @@ class MaxClient:
             updated_msg = client.edit_message(12345678, "12111121", "New text")
             ```
         """
-        seq = self.seq
-        self.websocket.send(json.dumps({
-            "ver": 11,
-            "cmd": 0,
-            "seq": seq,
-            "opcode": 67,
-            "payload": {
-                "chatId": chat_id,
-                "messageId": str(message_id),
-                "text": text,
-                "elements": [],
-                "attachments": []
-            }
-        }))
-
-        while True:
-            recv = json.loads(self.websocket.recv())
-            if recv["seq"] != seq:
-                pass
-            else:
-                break
+        recv = self.invoke_method(67, {
+            "chatId": chat_id,
+            "messageId": str(message_id),
+            "text": text,
+            "elements": [],
+            "attachments": []
+        })
         payload = recv["payload"]
         msg = Message(self, chat_id, **payload["message"])
-        
         return msg
     
     # region pin_chat()
@@ -622,7 +608,8 @@ class MaxClient:
                 }
             }
         }
-        self.websocket.send(json.dumps(j))
+        with self._send_lock:
+            self.websocket.send(json.dumps(j))
         return True
 
     # region unpin_chat()
@@ -642,7 +629,8 @@ class MaxClient:
                 }
             }
         }
-        self.websocket.send(json.dumps(j))
+        with self._send_lock:
+            self.websocket.send(json.dumps(j))
         return True
     
     # region get_user()
@@ -676,33 +664,28 @@ class MaxClient:
         phone = kwargs.get('phone')
         chat_id = kwargs.get('chat_id')
         _f = kwargs.get("_f")
-        seq = self.seq
+
+        cache_key = id if id is not None else (f"phone:{phone}" if phone else None)
+        if cache_key is not None and cache_key in self._user_cache:
+            return self._user_cache[cache_key]
 
         if id:
-            j = {"ver":11,"cmd":0,"seq":seq,"opcode":32,"payload":{"contactIds":[id]}}
+            opcode, req_payload = 32, {"contactIds": [id]}
         elif phone:
-            j = {"ver":11,"cmd":0,"seq":seq,"opcode":46,"payload":{"phone":str(phone)}}
+            opcode, req_payload = 46, {"phone": str(phone)}
         elif chat_id:
             id = self.me.contact.id ^ chat_id
-            j = {"ver":11,"cmd":0,"seq":seq,"opcode":32,"payload":{"contactIds":[id]}}
+            opcode, req_payload = 32, {"contactIds": [id]}
         else:
             raise ValueError("no `id` or `phone` or `chat_id` provided")
-        
-        self.websocket.send(json.dumps(j))
 
-        while True:
-            recv = json.loads(self.websocket.recv())
-            if recv["seq"] != seq:
-                pass
-            else:
-                break
-
+        recv = self.invoke_method(opcode, req_payload)
         payload = recv["payload"]
 
         error = payload.get("error")
 
         if error:
-            raise UserNotFound(error, payload["message"]+f": {phone}")
+            raise UserNotFound(error, payload.get("message", "") + f": {phone}")
 
         if id:
             contact = payload["contacts"][0]
@@ -710,13 +693,17 @@ class MaxClient:
             payload["contact"]["phone"] = phone
             contact = payload["contact"]
 
-        return User(self, contact, _f)
+        user = User(self, contact, _f)
+        if cache_key is not None:
+            self._user_cache[cache_key] = user
+        return user
 
     # region session_exit()
     def session_exit(self):
         """Terminates active session token. **There no way back.**"""
         j = {"ver":11,"cmd":0,"seq":self.seq,"opcode":20,"payload":{}}
-        self.websocket.send(json.dumps(j))
+        with self._send_lock:
+            self.websocket.send(json.dumps(j))
         self.disconnect()
         return True
     
@@ -736,80 +723,34 @@ class MaxClient:
             Reactions: An object containing information about the updated message reactions,
                     including counters for each emoji, your own reaction, and the total count.
         """
-        seq = self.seq
-        j = {"ver":11,"cmd":0,"seq":seq,"opcode":178,"payload":{"chatId":chat_id,"messageId":message_id,"reaction":{"reactionType":"EMOJI","id":reaction}}}
-        self.websocket.send(json.dumps(j))
-
-        while True:
-            recv = json.loads(self.websocket.recv())
-            if recv["seq"] != seq:
-                pass
-            else:
-                break
-
-        payload = recv["payload"] # {"ver":11,"cmd":1,"seq":79,"opcode":178,"payload":{"reactionInfo":{"counters":[{"count":1,"reaction":"â¤ï¸"}],"yourReaction":"â¤ï¸","totalCount":1}}}
-        
-        return Reactions(**payload)
+        recv = self.invoke_method(
+            178,
+            {
+                "chatId": chat_id,
+                "messageId": message_id,
+                "reaction": {"reactionType": "EMOJI", "id": reaction},
+            },
+        )
+        return Reactions(**recv["payload"])
     
     # region contact_add()
     def contact_add(self, user_id: int):
-        seq = self.seq
-        j = {"ver":11, "cmd":0, "seq":seq, "opcode":34, "payload":{"contactId": user_id, "action": "ADD"}}
-        self.websocket.send(json.dumps(j))
-
-        while True:
-            recv = json.loads(self.websocket.recv())
-            if recv["seq"] != seq:
-                pass
-            else:
-                break
-        payload = recv["payload"]
-
-        return User(self, payload["contact"])
+        recv = self.invoke_method(34, {"contactId": user_id, "action": "ADD"})
+        return User(self, recv["payload"]["contact"])
     
     # region contact_remove()
     def contact_remove(self, user_id: int):
-        seq = self.seq
-        j = {"ver":11, "cmd":0, "seq":seq, "opcode":34, "payload":{"contactId": user_id, "action": "REMOVE"}}
-        self.websocket.send(json.dumps(j))
-
-        while True:
-            recv = json.loads(self.websocket.recv())
-            if recv["seq"] != seq:
-                pass
-            else:
-                break
-            
+        self.invoke_method(34, {"contactId": user_id, "action": "REMOVE"})
         return True
     
     # region contact_block()
     def contact_block(self, user_id: int):
-        seq = self.seq
-        j = {"ver":11, "cmd":0, "seq":seq, "opcode":34, "payload":{"contactId": user_id, "action": "BLOCK"}}
-        self.websocket.send(json.dumps(j))
-
-        while True:
-            recv = json.loads(self.websocket.recv())
-            if recv["seq"] != seq:
-                pass
-            else:
-                break
-            
+        self.invoke_method(34, {"contactId": user_id, "action": "BLOCK"})
         return True
     
     # region contact_unblock()
     def contact_unblock(self, user_id: int):
-        seq = self.seq
-        j = {"ver":11, "cmd":0, "seq":seq, "opcode":34, "payload":{"contactId": user_id, "action": "UNBLOCK"}}
-        self.websocket.send(json.dumps(j))
-
-        while True:
-            recv = json.loads(self.websocket.recv())
-            if recv["seq"] != seq:
-                pass
-            else:
-                break
-            
+        self.invoke_method(34, {"contactId": user_id, "action": "UNBLOCK"})
         return True
                 
     # region @on_message()
@@ -841,6 +782,76 @@ class MaxClient:
 
         return decorator
     
+    # region get_file_download_url
+    def get_file_download_url(self, file_id, chat_id=None, message_id=None):
+        """Resolve a direct download URL for a FILE attach (opcode 88)."""
+        try:
+            payload = {"fileId": file_id}
+            if chat_id is not None:
+                payload["chatId"] = chat_id
+            if message_id is not None:
+                payload["messageId"] = str(message_id)
+            recv = self.invoke_method(88, payload)
+            p = recv.get("payload") or {}
+            if p.get("error"):
+                print("file download error:", p)
+                return None
+            return p.get("url")
+        except Exception as e:
+            print("get_file_download_url:", e)
+            return None
+
+    def get_video_download_urls(
+        self,
+        video_id,
+        chat_id=None,
+        message_id=None,
+        token=None,
+    ) -> list[str]:
+        """Resolve MP4 CDN URLs for a VIDEO attach (opcode 83)."""
+        try:
+            payload = {"videoId": video_id}
+            if chat_id is not None:
+                payload["chatId"] = chat_id
+            if message_id is not None:
+                payload["messageId"] = str(message_id)
+            if token:
+                payload["token"] = token
+            recv = self.invoke_method(83, payload)
+            p = recv.get("payload") or {}
+            if p.get("error"):
+                print("video download error:", p)
+                return []
+
+            # Prefer higher quality progressive MP4 over HLS/EXTERNAL
+            preferred = (
+                "MP4_1080", "MP4_720", "MP4_480", "MP4_360", "MP4_240",
+                "DASH", "HLS",
+            )
+            urls: list[str] = []
+            for key in preferred:
+                val = p.get(key)
+                if isinstance(val, str) and val.startswith("http"):
+                    urls.append(val)
+            for key, val in p.items():
+                if key in ("cache", "EXTERNAL") or not isinstance(val, str):
+                    continue
+                if val.startswith("http") and val not in urls:
+                    urls.append(val)
+            if isinstance(p.get("url"), str):
+                urls.append(p["url"])
+            # drop m3u8 / dash manifests — need progressive file for TG
+            urls = [u for u in urls if ".m3u8" not in u.lower() and "manifest" not in u.lower()]
+            print(f"video urls for {video_id}: {len(urls)} candidates keys={list(p.keys())}")
+            return urls
+        except Exception as e:
+            print("get_video_download_urls:", e)
+            return []
+
+    def get_video_download_url(self, video_id, chat_id=None, message_id=None, token=None):
+        urls = self.get_video_download_urls(video_id, chat_id, message_id, token)
+        return urls[0] if urls else None
+
     #region @on_connect
     def on_connect(self, func):
         """
