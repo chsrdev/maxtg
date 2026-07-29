@@ -86,36 +86,39 @@ class User:
 
 # region Chat
 class Chat:
-    def __init__(self, client, chat_id):
+    def __init__(self, client, chat_id, light: bool = True):
         """
         Represents a chat in the messaging system.
 
-        This class associates a chat with a client instance and its unique ID.
+        light=True (default) only stores chat id — does not fetch history
+        over the shared websocket (that used to drop other messages).
         """
         if chat_id == 0:
+            self.id = 0
+            self.messages = []
             return
         self._client = client
 
         self.id: int = chat_id
         self.link = f"https://web.max.ru/{chat_id}"
+        self.messages = []
 
-        seq = client.seq
-        client.websocket.send(json.dumps({"ver":11,"cmd":0,"seq":seq,"opcode":49,"payload":{"chatId":chat_id,"from":int(time.time()*1000),"forward":0,"backward":30,"getMessages":True}}))
-        while True:
-            r = client.websocket.recv()
-            recv = json.loads(r)
-            if recv["seq"] == seq and recv["opcode"] == 49:
-                break
-            else:
-                pass
-        
-        payload = recv["payload"]
-        if not recv["opcode"] in [150]:
-            _ = []
-            for msg in payload["messages"]:
-                m = Message(client, 0, **msg, _f=1)
-                _.append(m)
-            self.messages: list[Message] = _
+        if light:
+            return
+
+        recv = client.invoke_method(
+            49,
+            {
+                "chatId": chat_id,
+                "from": int(time.time() * 1000),
+                "forward": 0,
+                "backward": 30,
+                "getMessages": True,
+            },
+        )
+        payload = recv.get("payload", {})
+        for msg in payload.get("messages", []):
+            self.messages.append(Message(client, 0, **msg, _f=1))
 
     # region pin()
     def pin(self):
@@ -143,8 +146,8 @@ class Message:
         self.kwargs = kwargs
         self.status = kwargs.get("status")
 
-        if not _f:
-            self.chat = Chat(client, chatId)
+        # Always light chat — history fetch must not run inside the WS listener path
+        self.chat = Chat(client, chatId, light=True)
         self.sender = sender
         self.id = id
         self.time = time
